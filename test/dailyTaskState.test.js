@@ -201,3 +201,78 @@ test("an evicted failed config request cannot remove a newer cached request for 
   await loadDailyTaskConfig(store, "cache-race-a", fetchConfig);
   assert.equal(readsA, 2);
 });
+
+test("browser retries the same-origin CDN proxy when direct config fetch fails", async () => {
+  const store = {
+    async sendMessageWithPromise() {
+      return { dataBundleVer: "proxy-fallback-version" };
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  const hadWindow = Object.hasOwn(globalThis, "window");
+  const originalWindow = globalThis.window;
+  const urls = [];
+  globalThis.window = {};
+  globalThis.fetch = async (url) => {
+    urls.push(url);
+    if (
+      typeof url === "string" &&
+      url.startsWith("https://xxz-xyzw-res.hortorgames.com")
+    )
+      return { ok: false, status: 403, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => officialConfig() };
+  };
+  try {
+    const config = await loadDailyTaskConfig(store, "proxy-fallback");
+    assert.equal(config.tasks.length, 3);
+    assert.deepEqual(urls, [
+      "https://xxz-xyzw-res.hortorgames.com/data/proxy-fallback-version/config.json",
+      "/api/res/data/proxy-fallback-version/config.json",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (hadWindow) globalThis.window = originalWindow;
+    else delete globalThis.window;
+  }
+});
+
+test("browser reports a clear error when both CDN paths are unreachable", async () => {
+  const store = {
+    async sendMessageWithPromise() {
+      return { dataBundleVer: "unreachable-version" };
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  const hadWindow = Object.hasOwn(globalThis, "window");
+  const originalWindow = globalThis.window;
+  globalThis.window = {};
+  globalThis.fetch = async () => {
+    throw new Error("Failed to fetch");
+  };
+  try {
+    await assert.rejects(
+      loadDailyTaskConfig(store, "unreachable"),
+      /直连与同源代理 .* 均不可用/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (hadWindow) globalThis.window = originalWindow;
+    else delete globalThis.window;
+  }
+});
+
+test("config read failure reports the HTTP status for diagnosis", async () => {
+  const store = {
+    async sendMessageWithPromise() {
+      return { dataBundleVer: "http-status-version" };
+    },
+  };
+  await assert.rejects(
+    loadDailyTaskConfig(store, "http-status", async () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({}),
+    })),
+    /官方任务配置读取失败 \(HTTP 404\)/,
+  );
+});
