@@ -138,6 +138,13 @@ export default defineConfig(async () => {
       open: true,
       host: true,
       proxy: {
+        // 官方资源 CDN 代理：浏览器直连失败时回退到同源路径。
+        "/api/res": {
+          target: "https://xxz-xyzw-res.hortorgames.com",
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/res/, ""),
+          secure: true,
+        },
         // 手机号验证码接口需要以 ucenter-app-server Host 路由。
         "/api/hortor-ucenter": {
           target: "https://comb-platform.hortorgames.com",
