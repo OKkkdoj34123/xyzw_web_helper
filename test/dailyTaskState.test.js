@@ -261,7 +261,7 @@ test("browser reports a clear error when both CDN paths are unreachable", async 
   }
 });
 
-test("config read failure reports the HTTP status for diagnosis", async () => {
+test("config read failure reports the version and HTTP status for diagnosis", async () => {
   const store = {
     async sendMessageWithPromise() {
       return { dataBundleVer: "http-status-version" };
@@ -270,9 +270,86 @@ test("config read failure reports the HTTP status for diagnosis", async () => {
   await assert.rejects(
     loadDailyTaskConfig(store, "http-status", async () => ({
       ok: false,
-      status: 404,
+      status: 500,
       json: async () => ({}),
     })),
-    /官方任务配置读取失败 \(HTTP 404\)/,
+    /官方任务配置读取失败 \(版本 http-status-version HTTP 500\)/,
+  );
+});
+
+test("a server version missing from the CDN falls back to the official manifest", async () => {
+  const store = {
+    async sendMessageWithPromise() {
+      return { dataBundleVer: "stale-server-version" };
+    },
+  };
+  const urls = [];
+  const fetchConfig = async (url) => {
+    urls.push(url);
+    if (url.endsWith("/data/stale-server-version/config.json"))
+      return { ok: false, status: 404, json: async () => ({}) };
+    if (url.endsWith("/data/version.json"))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ version: "manifest-version" }),
+      };
+    if (url.endsWith("/data/manifest-version/config.json"))
+      return { ok: true, status: 200, json: async () => officialConfig() };
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const config = await loadDailyTaskConfig(store, "stale-server", fetchConfig);
+  assert.equal(config.tasks.length, 3);
+  assert.deepEqual(urls, [
+    "https://xxz-xyzw-res.hortorgames.com/data/stale-server-version/config.json",
+    "https://xxz-xyzw-res.hortorgames.com/data/version.json",
+    "https://xxz-xyzw-res.hortorgames.com/data/manifest-version/config.json",
+  ]);
+  // The fallback result is cached under the game-reported version, so the
+  // failing lookup is not repeated on the next run.
+  urls.length = 0;
+  assert.equal(await loadDailyTaskConfig(store, "stale-server", fetchConfig), config);
+  assert.deepEqual(urls, []);
+});
+
+test("a failed fallback reports both versions and the HTTP status", async () => {
+  const store = {
+    async sendMessageWithPromise() {
+      return { dataBundleVer: "broken-server-version" };
+    },
+  };
+  const fetchConfig = async (url) => {
+    if (url.endsWith("/data/version.json"))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ version: "broken-manifest-version" }),
+      };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  await assert.rejects(
+    loadDailyTaskConfig(store, "broken-server", fetchConfig),
+    /版本 broken-server-version → broken-manifest-version HTTP 404/,
+  );
+});
+
+test("an invalid official manifest cannot silently become the config version", async () => {
+  const store = {
+    async sendMessageWithPromise() {
+      return { dataBundleVer: "unsafe-server-version" };
+    },
+  };
+  const fetchConfig = async (url) => {
+    if (url.endsWith("/data/version.json"))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ version: "../invalid" }),
+      };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  await assert.rejects(
+    loadDailyTaskConfig(store, "unsafe-server", fetchConfig),
+    /官方版本清单未提供可用替代版本/,
   );
 });
