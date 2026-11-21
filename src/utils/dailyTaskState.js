@@ -149,6 +149,51 @@ export async function fillHangUpTime({
   return { sent: before.remaining, ...after };
 }
 
+const CONFIG_CDN_ORIGIN = "https://xxz-xyzw-res.hortorgames.com";
+const CONFIG_PROXY_PREFIX = "/api/res";
+const CONFIG_FETCH_TIMEOUT_MS = 30000;
+
+/**
+ * Default browser fetch: try the official CDN directly, then the same-origin
+ * proxy shipped with the Cloudflare Pages worker / Vite dev server. Some
+ * networks block or throttle the game CDN from the browser, which used to be
+ * reported only as 官方任务配置读取失败 and aborted every daily-task run.
+ * @param {string} url Absolute CDN URL.
+ * @param {RequestInit} [init] Fetch options.
+ * @returns {Promise<Response>} Successful response, or the best error response.
+ */
+async function fetchWithProxyFallback(url, init) {
+  const proxyUrl =
+    typeof window !== "undefined" && url.startsWith(CONFIG_CDN_ORIGIN)
+      ? `${CONFIG_PROXY_PREFIX}${url.slice(CONFIG_CDN_ORIGIN.length)}`
+      : null;
+  if (!proxyUrl) return globalThis.fetch(url, init);
+
+  let directResponse;
+  try {
+    directResponse = await globalThis.fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(CONFIG_FETCH_TIMEOUT_MS),
+    });
+    if (directResponse.ok) return directResponse;
+  } catch {
+    // Transport-level failures (CORS, DNS, timeout) also go through the proxy.
+  }
+  try {
+    const proxyResponse = await globalThis.fetch(proxyUrl, {
+      ...init,
+      signal: AbortSignal.timeout(CONFIG_FETCH_TIMEOUT_MS),
+    });
+    return proxyResponse.ok ? proxyResponse : (directResponse ?? proxyResponse);
+  } catch (error) {
+    if (directResponse) return directResponse;
+    throw new Error(
+      `官方任务配置读取失败：直连与同源代理 ${proxyUrl} 均不可用 (${error.message})`,
+      { cause: error },
+    );
+  }
+}
+
 /**
  * Load task targets from the official data version returned by the game server.
  * Only immutable configuration is cached; role progress is never cached here.
@@ -160,7 +205,7 @@ export async function fillHangUpTime({
 export async function loadDailyTaskConfig(
   tokenStore,
   tokenId,
-  fetchConfig = globalThis.fetch,
+  fetchConfig = fetchWithProxyFallback,
 ) {
   const response = await tokenStore.sendMessageWithPromise(
     tokenId,
@@ -174,10 +219,13 @@ export async function loadDailyTaskConfig(
   if (!configsByVersion.has(version)) {
     const loading = (async () => {
       const response = await fetchConfig(
-        `https://xxz-xyzw-res.hortorgames.com/data/${version}/config.json`,
-        { signal: AbortSignal.timeout(30000) },
+        `${CONFIG_CDN_ORIGIN}/data/${version}/config.json`,
+        { signal: AbortSignal.timeout(CONFIG_FETCH_TIMEOUT_MS) },
       );
-      if (!response.ok) throw new Error("官方任务配置读取失败");
+      if (!response.ok)
+        throw new Error(
+          `官方任务配置读取失败 (HTTP ${response.status ?? "未知"})`,
+        );
       const config = await response.json();
       return validateDailyTaskConfig(config);
     })();
