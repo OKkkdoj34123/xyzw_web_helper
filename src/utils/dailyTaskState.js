@@ -218,13 +218,43 @@ export async function loadDailyTaskConfig(
     throw new Error("服务器未提供有效的任务配置版本");
   if (!configsByVersion.has(version)) {
     const loading = (async () => {
-      const response = await fetchConfig(
-        `${CONFIG_CDN_ORIGIN}/data/${version}/config.json`,
-        { signal: AbortSignal.timeout(CONFIG_FETCH_TIMEOUT_MS) },
-      );
+      const fetchOptions = () => ({
+        signal: AbortSignal.timeout(CONFIG_FETCH_TIMEOUT_MS),
+      });
+      const configUrl = (v) => `${CONFIG_CDN_ORIGIN}/data/${v}/config.json`;
+
+      let response = await fetchConfig(configUrl(version), fetchOptions());
+      let usedVersion = version;
+
+      // Some game servers report a data version that has not been published
+      // to the public CDN. Fall back to the version advertised by the
+      // official manifest so those servers can still read daily-task targets.
+      if (response.status === 404) {
+        const manifestResponse = await fetchConfig(
+          `${CONFIG_CDN_ORIGIN}/data/version.json`,
+          fetchOptions(),
+        );
+        if (!manifestResponse.ok)
+          throw new Error(
+            `官方任务配置读取失败 (版本 ${version} HTTP 404，官方版本清单 HTTP ${manifestResponse.status ?? "未知"})`,
+          );
+        const manifest = await manifestResponse.json();
+        const fallbackVersion = manifest?.version;
+        if (
+          typeof fallbackVersion !== "string" ||
+          !/^[\w-]+$/.test(fallbackVersion) ||
+          fallbackVersion === version
+        )
+          throw new Error(
+            `官方任务配置读取失败 (版本 ${version} HTTP 404，官方版本清单未提供可用替代版本)`,
+          );
+        usedVersion = fallbackVersion;
+        response = await fetchConfig(configUrl(fallbackVersion), fetchOptions());
+      }
+
       if (!response.ok)
         throw new Error(
-          `官方任务配置读取失败 (HTTP ${response.status ?? "未知"})`,
+          `官方任务配置读取失败 (版本 ${version}${usedVersion === version ? "" : ` → ${usedVersion}`} HTTP ${response.status ?? "未知"})`,
         );
       const config = await response.json();
       return validateDailyTaskConfig(config);
